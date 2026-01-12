@@ -3,23 +3,25 @@ name: Daily Stock AI Report (Beijing 12:00 & 16:00)
 on:
   workflow_dispatch: {}
   schedule:
-    # GitHub Actions schedule uses UTC time.
-    # Beijing Time (UTC+8):
-    # 12:00 BJT -> 04:00 UTC
-    - cron: "0 4 * * *"
-    # 16:00 BJT -> 08:00 UTC
-    - cron: "0 8 * * *"
+    - cron: "0 4 * * *"   # 12:00 BJT
+    - cron: "0 8 * * *"   # 16:00 BJT
 
 permissions:
   contents: write
+
+concurrency:
+  group: stock-ai-report-main
+  cancel-in-progress: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repo (full history)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -38,8 +40,9 @@ jobs:
         run: |
           python main.py
 
-      - name: Commit and push reports
+      - name: Commit and push reports (rebase-safe)
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
@@ -48,7 +51,8 @@ jobs:
 
           git commit -m "chore: daily report" || echo "No changes to commit"
 
-          # 关键：先把远端最新提交rebase到本地，再推送
+          # 关键：先同步远端最新提交再推送，避免 fetch-first
           git pull --rebase origin main
-          git push origin main
 
+          # 再推送
+          git push origin HEAD:main
