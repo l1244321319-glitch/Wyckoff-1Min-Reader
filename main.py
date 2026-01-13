@@ -7,7 +7,7 @@ import mplfinance as mpf
 from openai import OpenAI
 
 # ==========================================
-# 1. 数据获取模块 (修改为1分钟K线, 600根)
+# 1. 数据获取模块 (支持动态设置 BARS_COUNT)
 # ==========================================
 
 def get_symbol_with_prefix(symbol: str) -> str:
@@ -21,7 +21,7 @@ def get_symbol_with_prefix(symbol: str) -> str:
     return symbol
 
 def fetch_a_share_minute(symbol: str) -> pd.DataFrame:
-    """获取A股最近600根1分钟K线"""
+    """获取A股1分钟K线，数量由环境变量 BARS_COUNT 决定"""
     print(f"正在获取 {symbol} 的1分钟数据...")
     formatted_symbol = get_symbol_with_prefix(symbol)
     
@@ -51,8 +51,10 @@ def fetch_a_share_minute(symbol: str) -> pd.DataFrame:
     df["date"] = pd.to_datetime(df["date"])
     df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].astype(float)
     
-    # 截取最近600根
-    df = df.sort_values("date").tail(600).reset_index(drop=True)
+    # === 修改点：支持环境变量控制 K 线数量 (默认为 600) ===
+    bars_count = int(os.getenv("BARS_COUNT", 600))
+    df = df.sort_values("date").tail(bars_count).reset_index(drop=True)
+    
     return df
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -64,14 +66,16 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ==========================================
-# 2. 本地绘图模块 (解决API无法直接画图的问题)
+# 2. 本地绘图模块 (增加错误捕获)
 # ==========================================
 
 def generate_local_chart(symbol: str, df: pd.DataFrame, save_path: str):
     """
     使用 mplfinance 在本地生成威科夫风格图表
-    因为 OpenAI API 只能返回文本，我们需要自己在本地生成图表以供参考
     """
+    if df.empty:
+        return
+
     plot_df = df.copy()
     plot_df.set_index("date", inplace=True)
 
@@ -80,43 +84,50 @@ def generate_local_chart(symbol: str, df: pd.DataFrame, save_path: str):
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=True)
 
     # 添加均线图层
-    apds = [
-        mpf.make_addplot(plot_df['ma50'], color='orange', width=1.0),
-        mpf.make_addplot(plot_df['ma200'], color='blue', width=1.2),
-    ]
+    apds = []
+    if 'ma50' in plot_df.columns:
+        apds.append(mpf.make_addplot(plot_df['ma50'], color='orange', width=1.0))
+    if 'ma200' in plot_df.columns:
+        apds.append(mpf.make_addplot(plot_df['ma200'], color='blue', width=1.2))
 
-    # 绘图并保存
-    mpf.plot(
-        plot_df,
-        type='candle',
-        style=s,
-        addplot=apds,
-        volume=True,
-        title=f"Wyckoff Chart: {symbol} (1-Min, Last 600 Bars)",
-        savefig=dict(fname=save_path, dpi=150, bbox_inches='tight'),
-        warn_too_much_data=1000
-    )
-    print(f"[OK] Chart saved to: {save_path}")
+    try:
+        # 绘图并保存
+        mpf.plot(
+            plot_df,
+            type='candle',
+            style=s,
+            addplot=apds,
+            volume=True,
+            title=f"Wyckoff Chart: {symbol} (1-Min, Last {len(df)} Bars)",
+            savefig=dict(fname=save_path, dpi=150, bbox_inches='tight'),
+            warn_too_much_data=2000 # 抑制警告
+        )
+        print(f"[OK] Chart saved to: {save_path}")
+    except Exception as e:
+        print(f"[Error] 绘图失败: {e}")
 
 # ==========================================
-# 3. AI 分析模块 (威科夫核心提示词)
+# 3. AI 分析模块 (异常捕获 + 省钱模式 + DeepSeek兼容)
 # ==========================================
 
 def ai_analyze_wyckoff(symbol: str, df: pd.DataFrame) -> str:
     api_key = os.getenv("OPENAI_API_KEY")
+    # 支持自定义 Base URL (例如 DeepSeek: https://api.deepseek.com)
+    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    # 支持自定义模型 (默认 gpt-4o-mini 省钱)
+    ai_model = os.getenv("AI_MODEL", "gpt-4o-mini")
+
     if not api_key:
         return "错误：未设置 OPENAI_API_KEY。"
 
-    client = OpenAI(api_key=api_key)
-
-    # 准备数据供 AI 阅读 (CSV格式)
-    # 保留关键字段，减少Token消耗，但必须包含量价
-    csv_data = df[["date", "open", "high", "low", "close", "volume", "ma50", "ma200"]].to_csv(index=False)
+    # === 省钱优化：只取最近 120 根数据给 AI ===
+    # 无论图表画多少根，AI 只需要看最近 2 小时的微观结构即可
+    recent_df = df.tail(120).copy()
+    csv_data = recent_df[["date", "open", "high", "low", "close", "volume"]].to_csv(index=False)
     
     latest_price = df.iloc[-1]["close"]
     latest_time = df.iloc[-1]["date"]
 
-    # === 核心修改：威科夫专用 Prompt ===
     prompt = f"""
 【唯一身份（不可偏离）】
 你不是“使用威科夫理论的分析师”，你就是理查德·D·威科夫（Richard D. Wyckoff）本人在中国股票市场中的延伸。你可以参照威科夫式叙述解释市场行为。
@@ -129,106 +140,67 @@ def ai_analyze_wyckoff(symbol: str, df: pd.DataFrame) -> str:
 - 跟随与终止（Stopping Action / Follow-through）
 - 吸筹 / 派发（Accumulation / Distribution）
 - 交易区间（TR）
-禁止引入与本书逻辑冲突的技术体系（例如：指标信号优先、形态预测优先、其他流派优先）。MA50/MA200仅可作为“背景辅助”，不得作为结论核心依据。
+禁止引入与本书逻辑冲突的技术体系。
 
-【核心原则（必须遵守）】
-1) 价格是结果，成交量是原因：所有标注与判断必须能回溯到量价关系，而不是形态名称本身。
-2) 位置第一，形态第二：同一行为在高位与低位意义不同；不允许脱离“位置”讨论 Spring、UTAD、LPS 等。
-3) 不要预测，要推演：只做条件推演；所有结论必须用“如果/那么/否则”表达，不做确定性预测。
-4) 市场是被操纵的：默认存在综合人；异常波动优先解释为吸收、试探、误导、清洗。
+【核心原则】
+1) 价格是结果，成交量是原因。
+2) 位置第一，形态第二。
+3) 不要预测，要推演。
+4) 市场是被操纵的（综合人视角）。
 
 【数据上下文】
-目标标的：{symbol} (A股)
-数据周期：1分钟K线 (最近600根)
-最新时间：{latest_time}
-最新价格：{latest_price}
-完整数据如下（请读取CSV进行分析）：
+目标标的：{symbol}
+数据范围：最近 2 小时 (120分钟) 的微观数据
+最新：{latest_time} @ {latest_price}
+数据内容：
 {csv_data}
 
-【固定工作流（严格按书中顺序执行；不得跳步）】
+【任务】
+请基于以上数据，输出一份简练的威科夫分析报告（Markdown）：
 
-第一步：Background（趋势/区间/操盘环境判断）
-你必须先回答（证据不足必须承认不确定）：
-- 当前行情是否已脱离趋势，进入可供操盘的交易区间（TR）？
-- 若在趋势中：是供不应求的健康趋势，还是被供给压制的衰竭趋势？
-- 若在区间中：该区间更符合吸筹逻辑还是派发逻辑？
-注意：在判断吸筹/派发之前，必须先判断是否存在可供操盘的区间。
+1. **Background (位置与趋势)**
+   - 当前微观结构属于吸筹、派发还是中继？
+   - 供求谁占优？
 
-第二步：三大定律解释市场行为（必须用证据说清楚，不是列名词）
-1) 供求定律：
-- 上涨是否得到成交量支持？
-- 下跌是否出现供应枯竭的迹象？
-2) 努力与结果定律（重点识别）：
-- 放量但价格不再前进 → 可能有对手盘在吸收
-- 缩量但价格仍能维持 → 一方力量已占据优势
-- 巨大努力但结果有限 → 行情临近转折/测试区
-3) 因果定律（区间=未来行情的原因）：
-- Phase B 的横向宽度与时间决定后续潜在能量
+2. **Key Events (关键行为)**
+   - 识别 SC, ST, Spring, UT, LPS 等信号。
+   - 必须结合“努力与结果”解释。
 
-第三步：结构识别（TR与Phase A–E）
-1) TR边界识别：
-- 区间真实上下边界以“收盘密集区”为主
-- 指出哪些极端影线属于操盘行为，不应作为区间边界
-2) Phase A–E（必须符合书中原意）：
-- Phase A：停止原趋势（Stopping Action）
-- Phase B：建仓/出货的主要工作区（操盘核心）
-- Phase C：最终测试（Spring 或 UT/UTAD）
-- Phase D：方向展开（SOS / SOW）
-- Phase E：趋势离开区间
-要求：
-- 不允许为了好看强行补齐 所有Phase
-- 若证据不足，只能标注“至 Phase B / C”，并说明缺失证据是什么
+3. **Trade Plan (交易计划)**
+   - 如果出现什么信号做多/做空？
+   - 止损位在哪里？
 
-第四步：关键事件与行为（满足书中条件才允许使用术语）
-你只能在满足书中条件时使用以下术语；每个术语必须附一句解释“为什么符合书中定义”，理由必须来自：供求/努力-结果/位置。
-吸筹侧：SC, ST, Spring, LPS, SOS/JAC
-派发侧：BC, UT/UTAD, SOW, LPSY
-
-【输出结构（严格，必须按顺序输出）】
-
-注意：由于这是纯文本对话，请详细描述图表应包含的关键点，以便读者对照本地生成的图表阅读。
-
-B) 第二部分：完整分析（Markdown格式）
-请按以下小标题输出完整的威科夫式分析：
-
-1. Background（操盘环境与位置）
-- 是否TR？吸筹/派发倾向与证据。
-- 用“综合人”视角解释其可能的操盘目标。
-
-2. 三大定律证据链（关键区段的量价行为）
-- 供求分析
-- 努力与结果（列出至少3处关键片段）
-- 因果推演
-
-3. 结构与阶段（TR边界 + Phase A–E）
-- 详细描述TR边界的价格位置。
-- 逐段说明Phase划分依据。
-
-4. 关键事件核验
-- 对每个事件（如Spring, UTAD）用一句话解释“为什么符合定义”。
-
-5. 交易策略（符合中国股票市场 T+1 规则）
-需要参考《威科夫操盘法》并且考虑以下问题：
-- 怎么买（最少2个交易策略，明确买入价/止损价/目标价）
-- 综合人可能动作（吸收/试探/误导/清洗/推进）
-并明确指出：
-- 哪条路径最符合当前结构
-- 哪条路径代表操盘失败或你先前判断的误判信号
-
-【开始】
-严格按以上顺序完成分析。证据不足宁可少标注也不要滥用术语。
+请直接输出分析内容。
     """.strip()
 
-    print("正在请求 OpenAI (Wyckoff Mode)...")
-    resp = client.chat.completions.create(
-        model="gpt-4o", # 建议使用 GPT-4o 以获得更好的逻辑推演能力
-        messages=[
-            {"role": "system", "content": "You are Richard D. Wyckoff."},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.3 # 降低随机性，提高分析严谨度
-    )
-    return resp.choices[0].message.content
+    print(f"正在请求 AI 分析 ({ai_model})...")
+    
+    # === 增加异常捕获，防止 API 挂了导致程序崩溃 ===
+    try:
+        client = OpenAI(api_key=api_key, base_url=base_url)
+        
+        resp = client.chat.completions.create(
+            model=ai_model, 
+            messages=[
+                {"role": "system", "content": "You are Richard D. Wyckoff."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3
+        )
+        return resp.choices[0].message.content
+        
+    except Exception as e:
+        # 如果报错，返回错误信息，确保主程序能继续运行（比如发送图表）
+        error_msg = f"""
+# 分析服务暂停
+
+**原因**: AI API 调用失败。
+**错误详情**: `{str(e)}`
+
+> **注意**: 尽管 AI 未能生成文字报告，但下方的 **K线图表** 依然有效，请参考图表进行手动分析。
+"""
+        print(f"[Error] AI 调用失败: {e}")
+        return error_msg
 
 # ==========================================
 # 4. 主程序
@@ -238,7 +210,7 @@ def main():
     # 默认股票代码 (可通过环境变量覆盖)
     symbol = os.getenv("SYMBOL", "600970") 
     
-    # 1. 获取数据 (1分钟线, 600根)
+    # 1. 获取数据
     df = fetch_a_share_minute(symbol)
     if df.empty:
         print("未获取到数据，程序终止。")
@@ -256,7 +228,7 @@ def main():
     df.to_csv(csv_path, index=False, encoding="utf-8-sig")
     print(f"[OK] CSV Saved: {csv_path} ({len(df)} rows)")
 
-    # 3. 本地生成图表 (因为API回传不了图片)
+    # 3. 本地生成图表
     chart_path = f"reports/{symbol}_chart_{ts}.png"
     generate_local_chart(symbol, df, chart_path)
 
