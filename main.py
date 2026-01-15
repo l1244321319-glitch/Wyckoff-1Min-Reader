@@ -141,7 +141,7 @@ def ai_analyze(symbol, df):
         except Exception as e: return f"Analysis Failed: {e}"
 
 # ==========================================
-# 4. PDF 生成模块 (核心新增)
+# 4. PDF 生成模块 (修复中文方块乱码)
 # ==========================================
 
 def generate_pdf_report(symbol, chart_path, report_text, pdf_path):
@@ -150,16 +150,30 @@ def generate_pdf_report(symbol, chart_path, report_text, pdf_path):
     # 1. 转换 Markdown 为 HTML
     html_content = markdown.markdown(report_text)
     
-    # 2. 获取图片的绝对路径 (PDF引擎需要)
+    # 2. 获取绝对路径
     abs_chart_path = os.path.abspath(chart_path)
     
-    # 3. 构建完整的 HTML 模板 (含中文字体配置)
-    # font-family: "WenQuanYi Micro Hei" 是我们在 daily.yml 里安装的字体
+    # === 关键修复：指定 Ubuntu 下中文字体文件的绝对路径 ===
+    # fonts-wqy-microhei 安装后的标准路径通常是下面这个
+    font_path = "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"
+    
+    # 为了防止本地运行报错，加个判断 (本地可以用微软雅黑)
+    if not os.path.exists(font_path):
+        # 如果是本地 Windows/Mac，尝试 fallback (这里只是示例，主要为了服务器不报错)
+        font_path = "msyh.ttc" 
+    
+    # 3. 构建 HTML (使用 @font-face 强制加载字体)
     full_html = f"""
     <html>
     <head>
         <meta charset="utf-8">
         <style>
+            /* 核心：定义中文字体 */
+            @font-face {{
+                font-family: "MyChineseFont";
+                src: url("{font_path}");
+            }}
+
             @page {{
                 size: A4;
                 margin: 1cm;
@@ -171,14 +185,25 @@ def generate_pdf_report(symbol, chart_path, report_text, pdf_path):
                     height: 1cm;
                 }}
             }}
+            
             body {{
-                font-family: "WenQuanYi Micro Hei", sans-serif;
+                /* 应用定义的字体 */
+                font-family: "MyChineseFont", sans-serif;
                 font-size: 12px;
                 line-height: 1.5;
             }}
-            h1, h2, h3 {{ color: #2c3e50; }}
+            
+            /* 确保标题和正文都继承字体 */
+            h1, h2, h3, p, div {{ 
+                font-family: "MyChineseFont", sans-serif; 
+                color: #2c3e50;
+            }}
+            
             img {{ width: 100%; height: auto; margin-bottom: 20px; }}
             .header {{ text-align: center; margin-bottom: 20px; color: #7f8c8d; font-size: 10px; }}
+            
+            /* 代码块样式优化 */
+            pre {{ background: #f4f4f4; padding: 10px; border-radius: 5px; }}
         </style>
     </head>
     <body>
@@ -191,7 +216,7 @@ def generate_pdf_report(symbol, chart_path, report_text, pdf_path):
         {html_content}
         
         <div id="footerContent" style="text-align:right; color:#bdc3c7; font-size:8px;">
-            Target: {symbol} | Data Source: EastMoney
+            Target: {symbol} | Data Source: EastMoney | Font: WenQuanYi Micro Hei
         </div>
     </body>
     </html>
@@ -241,3 +266,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
