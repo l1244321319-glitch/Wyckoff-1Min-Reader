@@ -106,13 +106,14 @@ def get_prompt_content(symbol, df):
 
 def call_gemini_http(prompt: str) -> str:
     """
-    使用 HTTP POST 直接调用 Gemini API (避开 SDK 兼容性问题)
+    使用 HTTP POST 直接调用 Gemini API
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GEMINI_API_KEY not found")
 
-    model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    # === 核心修改：默认模型改为 gemini-3-flash-preview ===
+    model_name = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
     print(f"   >>> 尝试调用 Google Gemini (HTTP Direct: {model_name})...")
 
     # 构建 REST API URL
@@ -123,7 +124,6 @@ def call_gemini_http(prompt: str) -> str:
         "contents": [{
             "parts": [{"text": prompt}]
         }],
-        # Gemini 1.5 支持 system instruction
         "system_instruction": {
             "parts": [{"text": "You are Richard D. Wyckoff. You follow strict Wyckoff logic."}]
         },
@@ -151,12 +151,11 @@ def call_openai_official(prompt: str) -> str:
     if not api_key:
         raise ValueError("OPENAI_API_KEY not found")
         
-    # 不再读取 Base URL，使用官方默认值
     model_name = os.getenv("AI_MODEL", "gpt-4o")
     
     print(f"   >>> 尝试调用 Official OpenAI ({model_name})...")
     
-    client = OpenAI(api_key=api_key) # 默认连接 api.openai.com
+    client = OpenAI(api_key=api_key)
     resp = client.chat.completions.create(
         model=model_name, 
         messages=[
