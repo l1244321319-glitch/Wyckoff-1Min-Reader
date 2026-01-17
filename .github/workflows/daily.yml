@@ -81,8 +81,8 @@ jobs:
             git push origin HEAD:main
           fi
 
-      # === 6. 批量推送 PDF 到 Telegram (你提供的代码) ===
-      - name: Notify Telegram (Batch PDFs)
+   # === 6. 精准推送本次生成的报告 ===
+      - name: Notify Telegram (Push List)
         if: success()
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
@@ -91,28 +91,34 @@ jobs:
         run: |
           set -euo pipefail
           
-          echo "=== 准备批量推送 PDF ==="
+          if [ ! -f push_list.txt ]; then
+            echo "::warning::没有找到 push_list.txt，本次运行没有新报告产生。"
+            exit 0
+          fi
           
-          # 查找最近 60 分钟内生成的 PDF 文件
-          # 这里的 -mmin -60 是关键，确保只发本次运行生成的新文件，不发几台前的旧文件
-          # 使用 while 循环逐个发送
+          echo "=== 开始推送 push_list.txt 中的文件 ==="
           
-          find reports -name "*.pdf" -type f -mmin -60 -print0 | while IFS= read -r -d '' PDF_FILE; do
-            echo "----------------------------------------"
-            echo "Found file: $PDF_FILE"
+          # 逐行读取 push_list.txt
+          while IFS= read -r PDF_FILE || [ -n "$PDF_FILE" ]; do
+            # 去除可能的空白符
+            PDF_FILE=$(echo "$PDF_FILE" | xargs)
             
-            FILENAME=$(basename "$PDF_FILE")
-            
-            # 发送请求
-            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
-              -F "chat_id=${TG_CHAT_ID}" \
-              -F "document=@$PDF_FILE" \
-              -F "caption=📊 Analysis: $FILENAME"
+            if [ -f "$PDF_FILE" ]; then
+              echo "----------------------------------------"
+              echo "🚀 Sending: $PDF_FILE"
               
-            echo "Sent successfully."
-            
-            # 休息 3 秒，防止 Telegram 报 429 Too Many Requests 错误
-            sleep 3
-          done
+              FILENAME=$(basename "$PDF_FILE")
+              
+              curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument" \
+                -F "chat_id=${TG_CHAT_ID}" \
+                -F "document=@$PDF_FILE" \
+                -F "caption=📊 Analysis: $FILENAME"
+                
+              echo "✅ Sent."
+              sleep 3
+            else
+              echo "::error::文件不存在: $PDF_FILE"
+            fi
+          done < push_list.txt
           
-          echo "=== 所有报告推送完毕 ==="
+          echo "=== 推送完毕 ==="
