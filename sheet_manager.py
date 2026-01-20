@@ -69,7 +69,7 @@ class SheetManager:
         return stocks
 
     def add_or_update_stock(self, symbol, date='', price='', qty=''):
-        """添加或更新，并返回详细信息"""
+        """添加或更新"""
         clean_symbol = ''.join(filter(str.isdigit, str(symbol))).zfill(6)
         print(f"   🔍 正在查找股票: {clean_symbol}")
         
@@ -80,8 +80,6 @@ class SheetManager:
             if cell:
                 print(f"   Found at Row {cell.row}. Updating...")
                 row = cell.row
-                # 只有当参数不为空时才更新，为空则保留原值（或者你可以选择覆盖为空）
-                # 这里假设传入空字符串代表“不修改该字段”
                 if date: self.sheet.update_cell(row, 2, str(date))
                 if price: self.sheet.update_cell(row, 3, str(price))
                 if qty: self.sheet.update_cell(row, 4, str(qty))
@@ -91,19 +89,13 @@ class SheetManager:
                 self.sheet.append_row([clean_symbol, str(date), str(price), str(qty)])
                 action_type = "🆕 新增关注"
 
-            # 重新读取该行数据以确认（确保返回给用户的是数据库里的真实值）
-            # 为了性能，这里直接用传入值构建返回字符串
-            # 如果没传入，给个提示
-            show_date = date if date else "(未变动/空)"
-            show_price = price if price else "(未变动/空)"
-            show_qty = qty if qty else "(未变动/空)"
+            show_date = date if date else "-"
+            show_price = price if price else "-"
+            show_qty = qty if qty else "-"
 
             return (
                 f"{action_type} {clean_symbol}\n"
-                f"──────\n"
-                f"📅 日期: {show_date}\n"
-                f"💰 成本: {show_price}\n"
-                f"📦 持仓: {show_qty}"
+                f"本次变动: {show_date} | {show_price} | {show_qty}"
             )
                 
         except Exception as e:
@@ -119,8 +111,30 @@ class SheetManager:
             cell = self.sheet.find(clean_symbol)
             if cell:
                 self.sheet.delete_rows(cell.row)
-                return f"🗑️ 已从关注列表中移除 {clean_symbol}"
+                return f"🗑️ 已移除 {clean_symbol}"
             else:
-                return f"⚠️ 列表中未找到 {clean_symbol}，无需删除"
+                return f"⚠️ 未找到 {clean_symbol}"
         except Exception as e:
             return f"❌ 删除失败: {e}"
+
+    # === 👇 新增：获取全部持仓文本摘要 ===
+    def get_portfolio_summary(self):
+        """返回格式化后的所有持仓列表字符串"""
+        stocks = self.get_all_stocks()
+        if not stocks:
+            return "\n📭 当前关注列表为空"
+
+        # 构建漂亮的列表
+        summary_lines = [f"\n📊 当前持仓汇总 ({len(stocks)}):"]
+        summary_lines.append("────────────────")
+        
+        for symbol, info in stocks.items():
+            # 简单展示格式：🔹 000001 (10.5 / 1000)
+            details = []
+            if info['price']: details.append(f"💰{info['price']}")
+            if info['qty']: details.append(f"📦{info['qty']}")
+            
+            detail_str = f" ({' '.join(details)})" if details else ""
+            summary_lines.append(f"🔹 `{symbol}`{detail_str}")
+        
+        return "\n".join(summary_lines)
