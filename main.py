@@ -20,16 +20,19 @@ def fetch_stock_data_dynamic(symbol: str, buy_date_str: str) -> dict:
     clean_digits = ''.join(filter(str.isdigit, str(symbol)))
     symbol_code = clean_digits.zfill(6)
     
-    # 1. 计算时间窗口
+    # 1. 计算时间窗口 (增强容错：如果是空日期，默认取最近15天)
+    start_date_em = (datetime.now() - timedelta(days=15)).strftime("%Y%m%d") # 默认值
+    
     try:
-        if buy_date_str and str(buy_date_str) != 'nan' and len(str(buy_date_str)) >= 10:
+        # 只有当日期字符串有效且长度足够时，才尝试解析
+        if buy_date_str and str(buy_date_str).lower() != 'nan' and len(str(buy_date_str)) >= 10:
             buy_dt = datetime.strptime(str(buy_date_str)[:10], "%Y-%m-%d")
             start_dt = buy_dt - timedelta(days=15) 
             start_date_em = start_dt.strftime("%Y%m%d")
-        else:
-            start_date_em = (datetime.now() - timedelta(days=15)).strftime("%Y%m%d")
-    except:
-        start_date_em = (datetime.now() - timedelta(days=15)).strftime("%Y%m%d")
+            # print(f"   📅 根据买入日期 [{str(buy_date_str)[:10]}] 回溯数据")
+    except Exception as e:
+        # 解析失败也不要紧，就用默认的15天
+        pass
 
     # 2. 优先拉取 5分钟 K线
     try:
@@ -41,7 +44,7 @@ def fetch_stock_data_dynamic(symbol: str, buy_date_str: str) -> dict:
     if df.empty:
         return {"df": pd.DataFrame(), "period": "5m"}
 
-    # 3. 策略切换
+    # 3. 策略切换 (数据量大时切15分钟)
     current_period = "5m"
     if len(df) > 960:
         try:
@@ -98,7 +101,7 @@ def generate_local_chart(symbol: str, df: pd.DataFrame, save_path: str, period: 
         print(f"   [Error] {symbol} 绘图失败: {e}")
 
 # ==========================================
-# 3. AI 分析模块 (针对 429 优化)
+# 3. AI 分析模块 (Fail Fast 策略)
 # ==========================================
 
 def get_prompt_content(symbol, df, position_info):
@@ -118,9 +121,16 @@ def get_prompt_content(symbol, df, position_info):
                           .replace("{latest_price}", str(latest["close"])) \
                           .replace("{csv_data}", csv_data)
     
-    buy_date = position_info.get('date', 'N/A')
-    buy_price = position_info.get('price', 'N/A')
-    qty = position_info.get('qty', 'N/A')
+    # 增强容错：如果字典里是 None 或 nan，转为 'N/A'
+    def safe_get(key):
+        val = position_info.get(key)
+        if val is None or str(val).lower() == 'nan' or str(val).strip() == '':
+            return 'N/A'
+        return val
+
+    buy_date = safe_get('date')
+    buy_price = safe_get('price')
+    qty = safe_get('qty')
 
     position_text = (
         f"\n\n[USER POSITION DATA]\n"
@@ -128,7 +138,7 @@ def get_prompt_content(symbol, df, position_info):
         f"Buy Date: {buy_date}\n"
         f"Cost Price: {buy_price}\n"
         f"Quantity: {qty}\n"
-        f"(Note: Please analyze the current trend based on this position data.)"
+        f"(Note: Please analyze the current trend based on this position data. If position data is N/A, analyze as a potential new entry.)"
     )
     
     return base_prompt + position_text
@@ -157,8 +167,8 @@ def call_gemini_http(prompt: str) -> str:
         "safetySettings": safety_settings 
     }
     
-    # Retry Logic
-    max_retries = 3
+    # === Retry Logic (只重试网络错误，不重试 429) ===
+    max_retries = 2
     for attempt in range(max_retries):
         try:
             # 180s 超时
@@ -180,15 +190,13 @@ def call_gemini_http(prompt: str) -> str:
                 
                 return text 
             
-            # === 429 限流处理 ===
+            # 🛑 遇到 429 (限流) -> 直接抛异常，切 OpenAI
             elif resp.status_code == 429:
-                print(f"   🛑 Gemini 429 Rate Limit (Attempt {attempt+1}/{max_retries})... Waiting 60s")
-                time.sleep(60) # 强制等待60秒，适应 Gemini 3 的严格限制
-                continue
+                raise Exception(f"Gemini 429 Rate Limit Reached: {resp.text[:100]}")
 
-            # === 503 过载处理 ===
+            # 503 过载 -> 小睡一下再试
             elif resp.status_code == 503:
-                print(f"   ⚠️ Gemini 503 Overloaded (Attempt {attempt+1}/{max_retries})... Waiting 5s")
+                print(f"   ⚠️ Gemini 503 Overloaded... Waiting 5s")
                 time.sleep(5)
                 continue
             
@@ -196,11 +204,15 @@ def call_gemini_http(prompt: str) -> str:
                 raise Exception(f"HTTP {resp.status_code}: {resp.text}")
 
         except Exception as e:
+            # 如果是 429 异常，直接往上抛，不要重试
+            if "429" in str(e):
+                raise e
+                
             if attempt == max_retries - 1:
                 print(f"   ❌ Gemini Final Fail: {e}")
                 raise e
             print(f"   ⚠️ Gemini Error (Attempt {attempt+1}): {e}... Retrying")
-            time.sleep(3)
+            time.sleep(2)
             
     raise Exception("Gemini Max Retries Exceeded")
 
@@ -225,7 +237,8 @@ def ai_analyze(symbol, df, position_info):
     try: 
         return call_gemini_http(prompt)
     except Exception as e: 
-        print(f"   ⚠️ [{symbol}] Gemini 彻底失败 -> 切 OpenAI")
+        # 打印简单错误信息，避免刷屏
+        print(f"   ⚠️ [{symbol}] Gemini 失败 (转切 OpenAI): {str(e)[:100]}...")
         try: 
             return call_openai_official(prompt)
         except Exception as e2: 
@@ -273,6 +286,10 @@ def generate_pdf_report(symbol, chart_path, report_text, pdf_path):
 # ==========================================
 
 def process_one_stock(symbol: str, position_info: dict):
+    # 【修复】防止 position_info 为 None 导致崩溃
+    if position_info is None:
+        position_info = {}
+
     clean_digits = ''.join(filter(str.isdigit, str(symbol)))
     clean_symbol = clean_digits.zfill(6)
 
