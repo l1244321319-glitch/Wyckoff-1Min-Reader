@@ -13,15 +13,17 @@ from sheet_manager import SheetManager
 import concurrent.futures 
 
 # ==========================================
-# 1. 数据获取模块
+# 1. 数据获取模块 (智能补全 + 策略切换)
 # ==========================================
 
 def fetch_stock_data_dynamic(symbol: str, buy_date_str: str) -> dict:
+    # 强制 6 位代码补全 (处理 Excel 丢零问题)
     clean_digits = ''.join(filter(str.isdigit, str(symbol)))
     symbol_code = clean_digits.zfill(6)
     
     # print(f"   -> [{symbol_code}] 正在获取数据...")
 
+    # 1. 计算时间窗口 (向前推15天)
     try:
         if buy_date_str and str(buy_date_str) != 'nan' and len(str(buy_date_str)) >= 10:
             buy_dt = datetime.strptime(str(buy_date_str)[:10], "%Y-%m-%d")
@@ -32,6 +34,7 @@ def fetch_stock_data_dynamic(symbol: str, buy_date_str: str) -> dict:
     except:
         start_date_em = (datetime.now() - timedelta(days=15)).strftime("%Y%m%d")
 
+    # 2. 优先拉取 5分钟 K线
     try:
         df = ak.stock_zh_a_hist_min_em(symbol=symbol_code, period="5", start_date=start_date_em, adjust="qfq")
     except Exception as e:
@@ -41,25 +44,31 @@ def fetch_stock_data_dynamic(symbol: str, buy_date_str: str) -> dict:
     if df.empty:
         return {"df": pd.DataFrame(), "period": "5m"}
 
+    # 3. 数据量判断与策略切换
     current_period = "5m"
     if len(df) > 960:
         try:
+            # 切换到 15分钟 K线
             df_15 = ak.stock_zh_a_hist_min_em(symbol=symbol_code, period="15", adjust="qfq")
             rename_map = {"时间": "date", "开盘": "open", "最高": "high", "最低": "low", "收盘": "close", "成交量": "volume"}
             df_15 = df_15.rename(columns={k: v for k, v in rename_map.items() if k in df_15.columns})
             df = df_15.tail(960).reset_index(drop=True) 
             current_period = "15m"
         except:
+            # 失败则回退
             df = df.tail(960)
 
+    # 4. 数据清洗
     rename_map = {"时间": "date", "开盘": "open", "最高": "high", "最低": "low", "收盘": "close", "成交量": "volume"}
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
     
     if "date" in df.columns: df["date"] = pd.to_datetime(df["date"])
+    
     cols = ["open", "high", "low", "close", "volume"]
     valid_cols = [c for c in cols if c in df.columns]
     df[valid_cols] = df[valid_cols].astype(float)
 
+    # 修复开盘价为0的情况
     if "open" in df.columns and (df["open"] == 0).any():
         df["open"] = df["open"].replace(0, np.nan)
         if "close" in df.columns:
@@ -95,7 +104,7 @@ def generate_local_chart(symbol: str, df: pd.DataFrame, save_path: str, period: 
         print(f"   [Error] {symbol} 绘图失败: {e}")
 
 # ==========================================
-# 3. AI 分析模块 (无修正版)
+# 3. AI 分析模块 (适配 Gemini-3-Flash)
 # ==========================================
 
 def get_prompt_content(symbol, df, position_info):
@@ -115,6 +124,7 @@ def get_prompt_content(symbol, df, position_info):
                           .replace("{latest_price}", str(latest["close"])) \
                           .replace("{csv_data}", csv_data)
     
+    # 纯文本注入持仓数据
     buy_date = position_info.get('date', 'N/A')
     buy_price = position_info.get('price', 'N/A')
     qty = position_info.get('qty', 'N/A')
@@ -134,16 +144,14 @@ def call_gemini_http(prompt: str) -> str:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key: raise ValueError("GEMINI_API_KEY missing")
     
-    # ⚠️【遵照指示】直接使用环境变量，不做任何修正
-    # 默认值留空，强迫它读取 GEMINI_MODEL
+    # 直接信任环境变量 (如 gemini-3-flash-preview)
     model_name = os.getenv("GEMINI_MODEL") 
-    
-    # 打印出来确认一下
-    # print(f"   >>> Gemini 正在请求: {model_name} ...")
+    if not model_name: model_name = "gemini-1.5-flash"
     
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
     
+    # 安全豁免设置 (关键)
     safety_settings = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -158,6 +166,7 @@ def call_gemini_http(prompt: str) -> str:
         "safetySettings": safety_settings 
     }
     
+    # 超时设为 60s (配合并发使用)
     resp = requests.post(url, headers=headers, json=data, timeout=60)
     
     if resp.status_code != 200: 
@@ -182,13 +191,12 @@ def call_gemini_http(prompt: str) -> str:
             raise ValueError(f"Content parts empty. FinishReason: {finish_reason}")
             
         text = parts[0].get('text', '')
-        if not text: raise ValueError("Empty text")
+        if not text: raise ValueError("Empty text string")
         
         return text
 
     except Exception as e:
-        # 如果出错，打印原始内容帮助调试
-        print(f"   [Debug] {model_name} 解析崩溃. 响应片段:\n{resp.text[:500]}") 
+        print(f"   [Debug] {model_name} 解析失败. 响应片段:\n{resp.text[:500]}") 
         raise e 
 
 def call_openai_official(prompt: str) -> str:
@@ -212,17 +220,56 @@ def ai_analyze(symbol, df, position_info):
     try: 
         return call_gemini_http(prompt)
     except Exception as e: 
-        print(f"   ⚠️ [{symbol}] Gemini ({os.getenv('GEMINI_MODEL')}) 失败: {e} -> 切 OpenAI")
+        # 自动切换 OpenAI
+        print(f"   ⚠️ [{symbol}] Gemini 失败: {e} -> 切 OpenAI")
         try: 
             return call_openai_official(prompt)
         except Exception as e2: 
             return f"Analysis Failed. Gemini Error: {e}. OpenAI Error: {e2}"
 
 # ==========================================
-# 5. 主程序 (5线程并发)
+# 4. PDF 生成模块
+# ==========================================
+
+def generate_pdf_report(symbol, chart_path, report_text, pdf_path):
+    html_content = markdown.markdown(report_text)
+    abs_chart_path = os.path.abspath(chart_path)
+    font_path = "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"
+    if not os.path.exists(font_path): font_path = "msyh.ttc" 
+    
+    full_html = f"""
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <style>
+            @font-face {{ font-family: "MyChineseFont"; src: url("{font_path}"); }}
+            @page {{ size: A4; margin: 1cm; }}
+            body {{ font-family: "MyChineseFont", sans-serif; font-size: 12px; line-height: 1.5; }}
+            h1, h2, h3, p, div {{ font-family: "MyChineseFont", sans-serif; color: #2c3e50; }}
+            img {{ width: 18cm; margin-bottom: 20px; }}
+            .header {{ text-align: center; margin-bottom: 20px; color: #7f8c8d; font-size: 10px; }}
+        </style>
+    </head>
+    <body>
+        <div class="header">Wyckoff Quantitative Analysis | {symbol}</div>
+        <img src="{abs_chart_path}" />
+        <hr/>
+        {html_content}
+    </body>
+    </html>
+    """
+    try:
+        with open(pdf_path, "wb") as pdf_file:
+            pisa.CreatePDF(full_html, dest=pdf_file)
+        return True
+    except: return False
+
+# ==========================================
+# 5. 主程序 (多线程并发版)
 # ==========================================
 
 def process_one_stock(symbol: str, position_info: dict):
+    # 补全代码
     clean_digits = ''.join(filter(str.isdigit, str(symbol)))
     clean_symbol = clean_digits.zfill(6)
 
@@ -241,9 +288,10 @@ def process_one_stock(symbol: str, position_info: dict):
     beijing_tz = timezone(timedelta(hours=8))
     ts = datetime.now(beijing_tz).strftime("%Y%m%d_%H%M%S")
     
-    # 保存 CSV
+    # 💾 保存清洗后的 K线数据为 CSV (关键功能)
     csv_path = f"data/{clean_symbol}_{period}_{ts}.csv"
     df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    # print(f"   💾 CSV Saved: {csv_path}")
 
     chart_path = f"reports/{clean_symbol}_chart_{ts}.png"
     pdf_path = f"reports/{clean_symbol}_report_{period}_{ts}.pdf"
@@ -272,7 +320,7 @@ def main():
 
     generated_pdfs = []
     
-    # 5 线程并发
+    # === 5线程并发执行 (大幅提升速度) ===
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         future_to_symbol = {
             executor.submit(process_one_stock, symbol, info): symbol 
@@ -289,13 +337,4 @@ def main():
                 print(f"❌ [{symbol}] 处理发生异常: {exc}")
 
     if generated_pdfs:
-        print(f"\n📝 生成推送清单 ({len(generated_pdfs)}):")
-        with open("push_list.txt", "w", encoding="utf-8") as f:
-            for pdf in generated_pdfs:
-                print(f"   -> {pdf}")
-                f.write(f"{pdf}\n")
-    else:
-        print("\n⚠️ 无报告生成")
-
-if __name__ == "__main__":
-    main()
+        print(f"\n📝 生成推送清单 ({len(generated_
