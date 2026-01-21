@@ -10,35 +10,29 @@ import numpy as np
 import markdown
 from xhtml2pdf import pisa
 from sheet_manager import SheetManager 
-# 移除并发库，因为我们要强制串行加延迟
-# import concurrent.futures 
 
 # ==========================================
-# 1. 数据获取模块 (固定 500根 5min)
+# 1. 数据获取模块
 # ==========================================
 
 def fetch_stock_data_dynamic(symbol: str, buy_date_str: str) -> dict:
     clean_digits = ''.join(filter(str.isdigit, str(symbol)))
     symbol_code = clean_digits.zfill(6)
-    
-    # 向前推 40 天
     start_date_em = (datetime.now() - timedelta(days=40)).strftime("%Y%m%d")
 
     try:
         df = ak.stock_zh_a_hist_min_em(symbol=symbol_code, period="5", start_date=start_date_em, adjust="qfq")
     except Exception as e:
-        print(f"   [Error] {symbol_code} AkShare接口报错: {e}")
+        print(f"   [Error] {symbol_code} AkShare接口报错: {e}", flush=True)
         return {"df": pd.DataFrame(), "period": "5m"}
 
     if df.empty:
         return {"df": pd.DataFrame(), "period": "5m"}
 
-    # 数据清洗
     rename_map = {"时间": "date", "开盘": "open", "最高": "high", "最低": "low", "收盘": "close", "成交量": "volume"}
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
     
     if "date" in df.columns: df["date"] = pd.to_datetime(df["date"])
-    
     cols = ["open", "high", "low", "close", "volume"]
     valid_cols = [c for c in cols if c in df.columns]
     df[valid_cols] = df[valid_cols].astype(float)
@@ -48,7 +42,6 @@ def fetch_stock_data_dynamic(symbol: str, buy_date_str: str) -> dict:
         if "close" in df.columns:
             df["open"] = df["open"].fillna(df["close"].shift(1)).fillna(df["close"])
 
-    # 强制截取最后 500 根
     if len(df) > 500:
         df = df.tail(500).reset_index(drop=True)
     
@@ -82,10 +75,10 @@ def generate_local_chart(symbol: str, df: pd.DataFrame, save_path: str, period: 
                  savefig=dict(fname=save_path, dpi=150, bbox_inches='tight'), 
                  warn_too_much_data=2000)
     except Exception as e:
-        print(f"   [Error] {symbol} 绘图失败: {e}")
+        print(f"   [Error] {symbol} 绘图失败: {e}", flush=True)
 
 # ==========================================
-# 3. AI 分析模块 (300s 超时 + 429 Fail Fast)
+# 3. AI 分析模块
 # ==========================================
 
 def get_prompt_content(symbol, df, position_info):
@@ -171,13 +164,11 @@ def call_gemini_http(prompt: str) -> str:
                 
                 return text 
             
-            # 429 Limit -> 不重试，直接抛异常给上层，让它切 OpenAI
             elif resp.status_code == 429:
                 raise Exception(f"Gemini 429 Rate Limit: {resp.text[:100]}")
 
-            # 503 Overload -> 重试
             elif resp.status_code == 503:
-                print(f"   ⚠️ Gemini 503 Overloaded... Waiting 5s")
+                print(f"   ⚠️ Gemini 503 Overloaded... Waiting 5s", flush=True)
                 time.sleep(5)
                 continue
             
@@ -185,11 +176,11 @@ def call_gemini_http(prompt: str) -> str:
                 raise Exception(f"HTTP {resp.status_code}: {resp.text}")
 
         except Exception as e:
-            if "429" in str(e): raise e # 抛出 429
+            if "429" in str(e): raise e
             if attempt == max_retries - 1:
-                print(f"   ❌ Gemini Final Fail: {e}")
+                print(f"   ❌ Gemini Final Fail: {e}", flush=True)
                 raise e
-            print(f"   ⚠️ Gemini Error (Attempt {attempt+1}): {e}... Retrying")
+            print(f"   ⚠️ Gemini Error (Attempt {attempt+1}): {e}... Retrying", flush=True)
             time.sleep(2)
             
     raise Exception("Gemini Max Retries Exceeded")
@@ -215,7 +206,7 @@ def ai_analyze(symbol, df, position_info):
     try: 
         return call_gemini_http(prompt)
     except Exception as e: 
-        print(f"   ⚠️ [{symbol}] Gemini 失败 (转切 OpenAI): {str(e)[:80]}...")
+        print(f"   ⚠️ [{symbol}] Gemini 失败 (转切 OpenAI): {str(e)[:80]}...", flush=True)
         try: 
             return call_openai_official(prompt)
         except Exception as e2: 
@@ -259,7 +250,7 @@ def generate_pdf_report(symbol, chart_path, report_text, pdf_path):
     except: return False
 
 # ==========================================
-# 5. 主程序 (手动循环 + 强制休息)
+# 5. 主程序 (串行 + 强制刷新 + 长冷却)
 # ==========================================
 
 def process_one_stock(symbol: str, position_info: dict):
@@ -267,14 +258,14 @@ def process_one_stock(symbol: str, position_info: dict):
     clean_digits = ''.join(filter(str.isdigit, str(symbol)))
     clean_symbol = clean_digits.zfill(6)
 
-    print(f"🚀 [{clean_symbol}] 开始分析...")
+    print(f"🚀 [{clean_symbol}] 开始分析...", flush=True)
 
     data_res = fetch_stock_data_dynamic(clean_symbol, position_info.get('date'))
     df = data_res["df"]
     period = data_res["period"]
     
     if df.empty:
-        print(f"   ⚠️ [{clean_symbol}] 数据为空，跳过")
+        print(f"   ⚠️ [{clean_symbol}] 数据为空，跳过", flush=True)
         return None
     
     df = add_indicators(df)
@@ -292,7 +283,7 @@ def process_one_stock(symbol: str, position_info: dict):
     report_text = ai_analyze(clean_symbol, df, position_info)
     
     if generate_pdf_report(clean_symbol, chart_path, report_text, pdf_path):
-        print(f"✅ [{clean_symbol}] 报告生成完毕")
+        print(f"✅ [{clean_symbol}] 报告生成完毕", flush=True)
         return pdf_path
     
     return None
@@ -301,19 +292,16 @@ def main():
     os.makedirs("data", exist_ok=True)
     os.makedirs("reports", exist_ok=True)
 
-    print("☁️ 正在连接 Google Sheets...")
+    print("☁️ 正在连接 Google Sheets...", flush=True)
     try:
         sm = SheetManager()
         stocks_dict = sm.get_all_stocks()
-        print(f"📋 获取 {len(stocks_dict)} 个任务")
+        print(f"📋 获取 {len(stocks_dict)} 个任务", flush=True)
     except Exception as e:
-        print(f"❌ Sheet 连接失败: {e}")
+        print(f"❌ Sheet 连接失败: {e}", flush=True)
         return
 
     generated_pdfs = []
-    
-    # ⚠️ 关键修改：不再使用线程池，改为手动循环
-    # 这样可以在每两个股票之间强制休息，防止 Gemini 3 Flash 的 429 报错
     
     items = list(stocks_dict.items())
     for i, (symbol, info) in enumerate(items):
@@ -322,21 +310,21 @@ def main():
             if pdf_path:
                 generated_pdfs.append(pdf_path)
         except Exception as e:
-            print(f"❌ [{symbol}] 处理发生异常: {e}")
+            print(f"❌ [{symbol}] 处理发生异常: {e}", flush=True)
         
-        # 如果不是最后一个，强制休息 20 秒
+        # 强制休息 60 秒
         if i < len(items) - 1:
-            print("⏳ 强制冷却 20秒 (防止 Gemini 429)...")
-            time.sleep(20)
+            print("⏳ 强制冷却 60秒 (防止 Gemini 429)...", flush=True)
+            time.sleep(60)
 
     if generated_pdfs:
-        print(f"\n📝 生成推送清单 ({len(generated_pdfs)}):")
+        print(f"\n📝 生成推送清单 ({len(generated_pdfs)}):", flush=True)
         with open("push_list.txt", "w", encoding="utf-8") as f:
             for pdf in generated_pdfs:
                 print(f"   -> {pdf}")
                 f.write(f"{pdf}\n")
     else:
-        print("\n⚠️ 无报告生成")
+        print("\n⚠️ 无报告生成", flush=True)
 
 if __name__ == "__main__":
     main()
