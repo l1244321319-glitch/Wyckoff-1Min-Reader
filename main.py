@@ -80,9 +80,11 @@ def call_gemini_http(prompt: str) -> str:
         "safetySettings": safety_settings,
     }
 
-    max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "8"))
-    base_sleep = float(os.getenv("GEMINI_BASE_SLEEP", "2.5"))
-    timeout_s = int(os.getenv("GEMINI_TIMEOUT", "300"))
+    # ⚠️ 修改点：默认最大重试次数改为 3
+    max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "3"))
+    base_sleep = float(os.getenv("GEMINI_BASE_SLEEP", "3.0")) # 基础等待也稍微缩短一点
+    timeout_s = int(os.getenv("GEMINI_TIMEOUT", "120"))       # 超时改为 2分钟
+
     last_err: Optional[Exception] = None
 
     for attempt in range(1, max_retries + 1):
@@ -106,7 +108,7 @@ def call_gemini_http(prompt: str) -> str:
                 
                 retry_s = _extract_retry_seconds(resp)
                 if retry_s <= 0:
-                    retry_s = int(base_sleep * (2 ** (attempt - 1)) + random.random() * 2)
+                    retry_s = int(base_sleep * (2 ** (attempt - 1)) + random.random())
 
                 if attempt == max_retries:
                     raise GeminiRateLimited(resp.text[:200])
@@ -116,8 +118,8 @@ def call_gemini_http(prompt: str) -> str:
                 continue
 
             if resp.status_code == 503:
-                retry_s = int(base_sleep * (2 ** (attempt - 1)) + random.random() * 2)
-                print(f"   ⚠️ Gemini 503过载，等待 {retry_s}s", flush=True)
+                retry_s = int(base_sleep * (2 ** (attempt - 1)) + random.random())
+                print(f"   ⚠️ Gemini 503过载，等待 {retry_s}s ({attempt}/{max_retries})", flush=True)
                 time.sleep(retry_s)
                 continue
 
@@ -129,14 +131,14 @@ def call_gemini_http(prompt: str) -> str:
             last_err = e
             if attempt == max_retries: raise
             retry_s = int(base_sleep * (2 ** (attempt - 1)) + random.random())
-            print(f"   ⚠️ Gemini 异常: {str(e)[:100]}... 等待 {retry_s}s", flush=True)
+            print(f"   ⚠️ Gemini 异常: {str(e)[:100]}... 等待 {retry_s}s ({attempt}/{max_retries})", flush=True)
             time.sleep(retry_s)
 
     raise last_err or Exception("Gemini Unknown Failure")
 
 
 # ==========================================
-# 1. 数据获取模块 (支持 1分钟 + 混合源)
+# 1. 数据获取模块 (BaoStock+AkShare+1min支持)
 # ==========================================
 
 def _get_baostock_code(symbol: str) -> str:
@@ -156,7 +158,6 @@ def fetch_stock_data_dynamic(symbol: str, timeframe_str: str, bar_count_str: str
     try: limit = int(bar_count_str)
     except: limit = 500
 
-    # 允许 1, 5, 15, 30, 60. 
     if tf_min not in [1, 5, 15, 30, 60]:
         print(f"   ⚠️ 周期 {tf_min} 非标准(支持1/5/15/30/60)，调整为 60", flush=True)
         tf_min = 60
@@ -252,7 +253,6 @@ def fetch_stock_data_dynamic(symbol: str, timeframe_str: str, bar_count_str: str
 
     return {"df": df_final, "period": f"{tf_min}m"}
 
-# ⚠️ 此处补回了之前丢失的 add_indicators
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "close" in df.columns:
@@ -353,7 +353,7 @@ def ai_analyze(symbol, df, position_info):
     try:
         return call_gemini_http(prompt)
     except GeminiFatalError as fe:
-        print(f"   ⚠️ [{symbol}] Gemini 致命错误 (Key无效/参数错) -> OpenAI", flush=True)
+        print(f"   ⚠️ [{symbol}] Gemini 致命错误 (Key无效/参数错) -> OpenAI: {str(fe)[:100]}", flush=True)
         try: return call_openai_official(prompt)
         except Exception as e2: return f"Analysis Failed. OpenAI Err: {e2}"
     except GeminiQuotaExceeded as qe:
