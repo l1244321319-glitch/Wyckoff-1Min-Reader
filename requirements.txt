@@ -7,4 +7,5 @@ gspread
 xhtml2pdf
 markdown
 requests
+baostock
 
