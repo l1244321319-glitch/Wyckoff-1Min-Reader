@@ -9,13 +9,20 @@
 > 
 > 一个基于 **GitHub Actions** 的全自动量化分析系统。它利用 **A股 1分钟微观数据**，结合 **AI 大模型 (Gemini/GPT-4o)** 进行 **威科夫 (Wyckoff)** 结构分析，并通过 **Telegram** 实现交互式监控与研报推送。
 
-## 📅 本周更新日志 (Weekly Update Changelog)
+# 📅 本周更新日志 (Weekly Update Changelog)
 
-> **版本摘要**：本周重点重构了数据获取引擎，解决了历史数据不足的问题；同时构建了“三级 AI 熔断兜底”机制，显著提升了 GitHub Actions 运行的稳定性与抗干扰能力。
+> **版本摘要**：本周重点重构了数据获取引擎，解决了历史数据不足的问题；构建了“三级 AI 熔断兜底”机制提升稳定性；同时升级了 **Google Sheet 适配器**，支持在表格中直接定义每只股票的分析周期和数据长度。
 
 ## 🚀 核心功能升级 (Core Features)
 
-### 1. 双源数据引擎 (Hybrid Data Engine)
+### 1. Google Sheet 适配升级 (Sheet Integration)
+`SheetManager` 模块进行了底层重构，支持动态读取表格的扩展列，实现了“千股千策”的配置能力。
+
+- **动态配置读取**：新增对表格 **第 5 列 (Timeframe)** 和 **第 6 列 (Bars)** 的读取支持。
+- **向下兼容设计**：如果表格中未填写这两列，程序会自动应用默认值（5分钟周期 / 500根 K 线），无需担心旧版表格报错。
+- **配置热更新**：无需修改代码，直接在 Google Sheet 修改数值，下次运行 Actions 时即可生效（例如将某只股票改为 60分钟级别）。
+
+### 2. 双源数据引擎 (Hybrid Data Engine)
 为了解决 AkShare 历史数据长度不足的问题，我们引入了 **BaoStock** 作为历史数据源。
 
 - **混合模式**：自动合并 `BaoStock` (历史长周期) + `AkShare` (实时/近期补全) 的数据。
@@ -25,60 +32,45 @@
     - **单位自动对齐**：智能检测并修复“手”与“股”之间的 100 倍数量级差异，防止量能指标（Volume）失真。
     - **索引冲突修复**：修复了合并数据时出现的 `Reindexing only valid with uniquely valued Index objects` 错误。
 
-### 2. 三级 AI 兜底策略 (Triple-Tier AI Fallback)
-为了应对 Google Gemini 官方接口频繁的 `429` (限流) 和 `503` (过载) 错误，构建了多级容错链：
+### 3. 三级 AI 兜底策略 (Triple-Tier AI Fallback)
+构建了多级容错链，应对官方接口频繁的 `429` (限流) 和 `503` (过载) 错误：
 
 1.  **第一优先级**：Google 官方 Gemini API (`gemini-3-flash-preview`)。
 2.  **第二优先级**：自定义中转 API (`api2.qiandao.mom` / `gemini-3-pro-preview-h`)。
 3.  **最终防线**：OpenAI / DeepSeek (`gpt-4o` 兼容接口)。
 
-> **策略优化**：一旦某一级 API 报错，程序采用“快速失败”策略（仅重试 1 次），立即切换到下一级，确保分析报告 100% 生成。
+> **策略优化**：采用“快速失败”策略（仅重试 1 次），遇到错误立即切换下一级，确保分析报告 100% 生成。
 
-### 3. 连接稳定性增强 (Connectivity)
-针对 GitHub Actions 环境下的 `RemoteDisconnected` 和超时问题进行了底层优化：
-
-- **防断连**：在 HTTP Header 中添加了伪装 `User-Agent`，并强制设置 `Connection: close`，防止复用已失效的 TCP 连接。
-- **致命错误熔断**：遇到 `400` (Key 无效/参数错) 等不可恢复错误时，直接抛出异常跳过重试，避免无效等待。
-- **超时调整**：单次请求超时时间延长至 **120秒**，以适应 Gemini 3.0 模型较长的思考时间。
-
-### 4. 高级自定义配置 (Customization)
-支持在 Google Sheets 中针对每一只股票进行个性化设置，实现“千股千策”：
-
-- **自定义周期**：支持 `1`, `5`, `15`, `30`, `60` 分钟级别。
-- **自定义长度**：可指定抓取 500 根、1000 根甚至更多 K 线用于长周期分析。
+### 4. 连接稳定性增强 (Connectivity)
+- **防断连**：HTTP Header 添加伪装 `User-Agent` 并强制 `Connection: close`，防止 TCP 连接复用导致的 `RemoteDisconnected` 错误。
+- **致命错误熔断**：遇到 `400` (Key 无效) 等错误直接中断重试。
+- **超时调整**：超时时间延长至 **120秒**，适应 Gemini 3.0 的思考时间。
 
 ---
 
-## 📖 配置指南 (Configuration Guide)
+## 🛠️ 配置变更指南 (Configuration Guide)
 
-### 1. Google Sheets 表格设置
-请在您的表格中新增 **第 5 列 (E)** 和 **第 6 列 (F)**：
+### 1. Google Sheets 表格结构变更
+建议在您的表格头行（第一行）新增 **Timeframe** 和 **Bars** 标题，并在对应列填写参数：
 
-| A (代码) | B (日期) | C (成本) | D (股数) | **E (周期)** | **F (K线数量)** |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `600519` | 2023-01-01 | 1500 | 100 | **60** | **1000** |
-| `000001` | 2023-02-01 | 12.5 | 5000 | **5** | **500** |
-| `300059` | 2023-03-05 | 15.2 | 2000 | **1** | **2000** |
+| 列号 | 标题 | 说明 | 示例值 |
+| :--- | :--- | :--- | :--- |
+| **A** | Symbol | 股票代码 | `600519` |
+| **B** | Date | 持仓日期 | `2023-01-01` |
+| **C** | Price | 持仓价格 | `1500` |
+| **D** | Qty | 持仓数量 | `100` |
+| **E** | **Timeframe** | **[新增] 分析周期 (分钟)** | `1`, `5`, `15`, `30`, `60` |
+| **F** | **Bars** | **[新增] K线抓取数量** | `500`, `1000`, `2000` |
 
-- **E 列 (Timeframe)**: 填 `1`, `5`, `15`, `30`, `60` (留空默认 5)。
-- **F 列 (Bars)**: 填希望 AI 分析的 K 线根数，如 `600`, `1000` (留空默认 500)。
+> *注：E、F 列留空则默认使用 `5m` 和 `500`。*
 
-### 2. GitHub Secrets 配置
-请确保仓库的 `Settings` -> `Secrets` 中包含以下 Key：
+### 2. GitHub Secrets 新增
+请前往仓库 Settings -> Secrets 添加：
 
-- `GEMINI_API_KEY`: Google 官方 API Key。
-- `CUSTOM_API_KEY`: **[新增]** 第三方中转 API Key (Qiandao)。
-- `OPENAI_API_KEY`: OpenAI 或 DeepSeek Key。
-- `GCP_SA_KEY`: Google Sheet 服务账号 JSON。
+- `CUSTOM_API_KEY`: **[必需]** 第三方中转 API 的 Key。
 
-### 3. Workflow 策略调整
-- **强制冷却**：每只股票分析间隔 **30秒**。
-- **模型版本**：默认使用 `gemini-3-flash-preview`。
-
----
-
-
-
+### 3. Workflow 策略
+- **强制冷却**：每只股票分析间隔调整为 **30秒**。
 
 ---
 
@@ -97,8 +89,6 @@
     * **午盘 (12:00)** & **收盘 (15:15)**：自动运行分析并推送报告。
     * **每 30 分钟**：自动同步 Telegram 指令，更新监控列表。
 
-
-<img width="731" height="825" alt="image" src="https://github.com/user-attachments/assets/5af1f8fc-cc67-4c02-b34d-e1749180ce2c" />
 
 ---
 ## 🏗️ 系统架构
