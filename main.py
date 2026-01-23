@@ -433,7 +433,7 @@ def call_custom_api(prompt: str) -> str:
         raise ValueError("CUSTOM_API_KEY missing, skipping custom API")
     
     base_url = "https://api2.qiandao.mom/v1"
-    model_name = "claude-3-5-sonnet-thinking-s"
+    model_name = "DeepSeek-V3.2-a"
     
     client = OpenAI(api_key=api_key, base_url=base_url)
     
@@ -468,21 +468,17 @@ def ai_analyze(symbol, df, position_info):
 
 
 # ==========================================
-# 4. PDF 生成模块 (修复文字截断问题)
+# 4. PDF 生成模块 (修复 Not a float 报错)
 # ==========================================
 
 def generate_pdf_report(symbol, chart_path, report_text, pdf_path):
-    # 1. 启用 'nl2br' 扩展，确保 Markdown 里的换行符能正确转换成 HTML <br>
+    # 1. 启用 'nl2br' 扩展
     html_content = markdown.markdown(report_text, extensions=['nl2br'])
     
     abs_chart_path = os.path.abspath(chart_path)
     font_path = "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"
     if not os.path.exists(font_path): font_path = "msyh.ttc"
 
-    # 2. 核心 CSS 修复：
-    # - word-break: break-all; -> 强制中文换行
-    # - white-space: pre-wrap; -> 保留格式
-    # - page-break-inside: auto; -> 允许跨页
     full_html = f"""
     <html>
     <head>
@@ -492,8 +488,8 @@ def generate_pdf_report(symbol, chart_path, report_text, pdf_path):
             
             @page {{
                 size: A4;
-                margin: 1.5cm; /* 稍微加大页边距 */
-                @frame footer_frame {{           /* 页脚设置 */
+                margin: 1cm; /* 缩小一点边距 */
+                @frame footer_frame {{
                     -pdf-frame-content: footerContent;
                     bottom: 0cm;
                     margin-left: 1cm;
@@ -505,50 +501,44 @@ def generate_pdf_report(symbol, chart_path, report_text, pdf_path):
             body {{ 
                 font-family: "MyChineseFont", sans-serif; 
                 font-size: 12px; 
-                line-height: 1.6;
+                line-height: 1.5;
                 color: #2c3e50;
-                /* ⚠️ 核心修复：强制中文自动换行，防止跑出右边界 */
                 word-wrap: break-word;
                 word-break: break-all; 
-                text-align: justify;
             }}
 
-            /* 优化标题显示 */
             h1, h2, h3 {{ 
                 color: #2c3e50; 
-                margin-top: 15px; 
-                margin-bottom: 10px;
-                line-height: 1.4;
+                margin-top: 10px; 
+                margin-bottom: 5px;
             }}
 
-            /* 优化图片显示，防止过宽 */
+            /* ⚠️ 核心修复：xhtml2pdf 不支持 width: 90% */
             img {{ 
-                width: 90%; 
-                height: auto;
-                margin: 20px auto; 
+                /* width: 90%;  <-- 这一行导致了报错，删掉 */
+                zoom: 55%;      /* 改用 zoom 缩放，或者用 width: 15cm; */
+                margin: 10px auto; 
                 display: block;
             }}
 
             .header {{ 
                 text-align: center; 
-                margin-bottom: 20px; 
+                margin-bottom: 10px; 
                 color: #7f8c8d; 
                 font-size: 14px; 
                 font-weight: bold;
                 border-bottom: 1px solid #eee;
-                padding-bottom: 10px;
+                padding-bottom: 5px;
             }}
             
-            /* 列表样式优化 */
-            ul, ol {{ margin-left: 20px; padding-left: 0; }}
-            li {{ margin-bottom: 5px; }}
+            ul, ol {{ margin-left: 15px; padding-left: 0; }}
+            li {{ margin-bottom: 3px; }}
             
-            /* 代码块或引用样式 */
             blockquote {{
                 background: #f9f9f9;
-                border-left: 4px solid #ccc;
-                margin: 10px 0;
-                padding: 5px 10px;
+                border-left: 3px solid #ccc;
+                margin: 5px 0;
+                padding: 5px;
                 color: #555;
             }}
         </style>
@@ -560,7 +550,7 @@ def generate_pdf_report(symbol, chart_path, report_text, pdf_path):
             <img src="{abs_chart_path}" />
         </div>
         
-        <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;"/>
+        <hr style="border: 0; border-top: 1px solid #eee; margin: 10px 0;"/>
         
         <div>
             {html_content}
@@ -575,8 +565,10 @@ def generate_pdf_report(symbol, chart_path, report_text, pdf_path):
     try:
         with open(pdf_path, "wb") as pdf_file: pisa.CreatePDF(full_html, dest=pdf_file)
         return True
-    except: return False
-
+    except Exception as e:
+        print(f"   ❌ PDF 生成失败: {e}", flush=True)
+        return False
+        
 # ==========================================
 # 5. 主程序 (串行 + 30s 休息)
 # ==========================================
@@ -660,6 +652,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
