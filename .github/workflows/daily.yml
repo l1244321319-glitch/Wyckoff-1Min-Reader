@@ -120,3 +120,9 @@ jobs:
             fi
           done < push_list.txt
           echo "=== Finished ==="
+          - name: Upload Reports
+          uses: actions/upload-artifact@v4
+          with:
+          name: analysis-reports
+          path: reports/
+          retention-days: 7
